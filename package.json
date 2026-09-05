@@ -1,0 +1,26 @@
+{
+    "name": "cogover-custom-backend-module-starter",
+    "version": "1.0.0",
+    "private": true,
+    "license": "MIT",
+    "type": "module",
+    "engines": {
+        "node": ">=20"
+    },
+    "scripts": {
+        "prestart": "npm run typecheck",
+        "start": "node --import tsx local/cli.ts --entry ./src/main.ts",
+        "dev": "nodemon --watch src --watch local --ext ts --signal SIGTERM --exec \"./node_modules/.bin/tsc -p tsconfig.json --noEmit && node --import tsx local/cli.ts --entry ./src/main.ts || exit 1\"",
+        "build": "npm run typecheck",
+        "typecheck": "tsc -p tsconfig.json --noEmit"
+    },
+    "dependencies": {
+        "@cogover/sdk": "0.5.0"
+    },
+    "devDependencies": {
+        "@types/node": "^20.0.0",
+        "nodemon": "^3.1.14",
+        "tsx": "^4.20.0",
+        "typescript": "^5.9.0"
+    }
+}
