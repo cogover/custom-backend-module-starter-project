@@ -1,5 +1,7 @@
 # Cogover Custom Backend Module Starter
 
+[English](README.md) | [Tiếng Việt](README.vi.md)
+
 A minimal TypeScript starter for developing, testing, and publishing a Cogover
 Custom Backend Module. The same handler runs through the local HTTP runner and
 on the Cogover Runtime Server.
