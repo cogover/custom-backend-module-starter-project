@@ -3,3 +3,4 @@ cogover.json
 cogover-*.json
 /.env
 npm-debug.log*
+/.idea/
