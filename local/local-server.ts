@@ -239,6 +239,9 @@ function validationMessage(details: Record<string, unknown>): string | undefined
     if (details.reason === "FIELD_NOT_WRITABLE") {
         return `Field '${fieldSlug}' on object '${objectSlug}' is read-only.`;
     }
+    if (details.reason === "FIELD_NOT_CREATABLE") {
+        return `Field '${fieldSlug}' on object '${objectSlug}' cannot be set when creating a record.`;
+    }
     if (details.reason === "UNIQUE_KEY_VIOLATION") {
         return `A record already exists with the same value for unique field '${fieldSlug}' on object '${objectSlug}'.`;
     }
