@@ -88,6 +88,51 @@ Run the type checker independently with:
 npm run typecheck
 ```
 
+Run the tests of the local tooling with:
+
+```bash
+npm test
+```
+
+## Run Record Triggers Locally
+
+Cogover sends real record events only to the active published version of a
+Project. To debug a trigger before publishing it, declare it with
+`defineTrigger`, list it in the named `triggers` export of `src/main.ts`, and
+start the local server as above. The default export becomes optional when the
+Project only has triggers. At startup the server prints the trigger keys, and
+`GET /__cogover/triggers` lists them with their normalized configuration.
+
+Run one trigger on demand with real records read through the Development
+Session:
+
+```bash
+curl -s -X POST 'http://127.0.0.1:3100/__cogover/triggers/order_credit_check' \
+  -H 'Content-Type: application/json' \
+  --data '{"operation": "update", "recordId": "<record-id>", "changes": {"status": "confirmed"}}'
+```
+
+- `operation` is `create`, `update`, or `delete`.
+- `update` and `delete` read record `recordId` of the trigger's Object, limited
+  to the trigger's `fields`, into `record.old`. For `update`, `changes` is
+  applied on top to form `record.new`; use the values as the handler should see
+  them.
+- `create` builds `record.new` from `changes` alone; the record has no `id` yet.
+- Send `records: [{"recordId": "...", "changes": {...}}, ...]` instead of the
+  single-record shorthand to run one call for up to 200 records.
+
+The response contains `input.records` exactly as the handler received them,
+`results` with the `changes` and `errors` of each record in the format the
+handler returns to Cogover, and `warnings`. The runner does not evaluate `when`,
+`changedFields`, or `runWhen`; it reports in `warnings` when Cogover would have
+skipped the trigger. A field in `changes` that is not listed in `fields` is
+ignored and reported.
+
+Before-change handlers are read-only in Cogover, but a local Development Session
+does not enforce that. Start `cogover-dev run --allow-writes=false` while testing
+before-change triggers so that a write in the handler fails locally too. Routes
+under `/__cogover/` exist only on the local server.
+
 ## Publish and Activate
 
 `npm run build` performs a TypeScript preflight check; it does not create the
@@ -116,7 +161,9 @@ files untracked.
 ├── cogover.example.json
 ├── local/
 │   ├── cli.ts
-│   └── local-server.ts
+│   ├── local-server.ts
+│   ├── trigger-runner.ts
+│   └── trigger-runner.test.ts
 ├── src/
 ├── package.json
 ├── package-lock.json

@@ -6,9 +6,22 @@ import {
     type ServerResponse,
 } from "node:http";
 import {resolve} from "node:path";
-import {CogoverApiError, type InvocationContext, type SandboxHandler} from "@cogover/sdk";
+import {CogoverApiError, type InvocationContext, type SandboxHandler, type TriggerDefinition} from "@cogover/sdk";
+import {
+    bridgeRecordReader,
+    findTrigger,
+    parseTriggerRunRequest,
+    runTriggerLocally,
+    triggerManifests,
+    TriggerRunError,
+    type RecordReader,
+} from "./trigger-runner.js";
 
 const URI_PREFIX = "/api/v1/ts-projects/";
+/** Local-only tooling namespace; it never exists on Cogover Runtime Server. */
+const LOCAL_TOOLING_PREFIX = "/__cogover";
+const TRIGGERS_PATH = `${LOCAL_TOOLING_PREFIX}/triggers`;
+const TRIGGER_KEY = /^[A-Za-z][A-Za-z0-9_]{0,99}$/;
 const MAX_INPUT_BYTES = 256 * 1024;
 const PROJECT_SLUG = /^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$/;
 const REQUEST_METHODS = new Set(["GET", "POST", "PUT", "PATCH", "DELETE"]);
@@ -53,13 +66,18 @@ interface CachedResponse {
 }
 
 export interface LocalServerOptions {
-    handler: SandboxHandler;
+    /** Default export of the project entry point; optional when the project only has triggers. */
+    handler?: SandboxHandler;
+    /** `triggers` export of the project entry point, served at `POST /__cogover/triggers/<key>`. */
+    triggers?: readonly TriggerDefinition[];
     projectSlug?: string;
     configPath?: string;
     host?: string;
     port?: number;
     /** Explicit test hook. Production loads the public snapshot from the active Development Session. */
     invocation?: InvocationContext;
+    /** Explicit test hook. Production reads records through the active Development Session. */
+    readRecord?: RecordReader;
     /** Test harness hook; production CLI leaves the server running until interrupted. */
     maxRequests?: number;
     /** Test hook for observing unexpected script failures without replacing process.stderr. */
@@ -437,6 +455,54 @@ function renderScriptResult(result: string | null): CachedResponse {
     }
 }
 
+type LocalToolingRoute = {kind: "triggers"} | {kind: "trigger"; key: string} | {kind: "unknown"};
+
+function parseLocalToolingPath(url: string | undefined): LocalToolingRoute | null {
+    if (!url) return null;
+    let pathname: string;
+    try {
+        pathname = new URL(url, "http://localhost").pathname;
+    } catch {
+        return null;
+    }
+    if (pathname !== LOCAL_TOOLING_PREFIX && !pathname.startsWith(`${LOCAL_TOOLING_PREFIX}/`)) return null;
+    if (pathname === TRIGGERS_PATH) return {kind: "triggers"};
+    if (pathname.startsWith(`${TRIGGERS_PATH}/`)) {
+        const key = pathname.slice(TRIGGERS_PATH.length + 1);
+        if (TRIGGER_KEY.test(key)) return {kind: "trigger", key};
+    }
+    return {kind: "unknown"};
+}
+
+function hasNonJsonBody(request: IncomingMessage): boolean {
+    const contentType = request.headers["content-type"]?.split(";", 1)[0]?.trim().toLowerCase();
+    const declaredLength = Number(request.headers["content-length"] ?? "0");
+    const hasBody = (Number.isFinite(declaredLength) && declaredLength > 0)
+        || request.headers["transfer-encoding"] !== undefined;
+    return hasBody && contentType !== "application/json";
+}
+
+function failureResponse(error: unknown, report: (error: unknown) => void): CachedResponse {
+    if (error instanceof TriggerRunError) {
+        return {
+            status: error.httpStatus,
+            body: JSON.stringify({r: error.httpStatus, code: error.code, msg: error.message}),
+        };
+    }
+    const httpStatus = isRecord(error) && typeof error.httpStatus === "number" ? error.httpStatus : undefined;
+    const requestFailure = httpStatus === 400 || httpStatus === 413;
+    if (!requestFailure && !(error instanceof CogoverApiError)) {
+        try {
+            report(error);
+        } catch {
+            // stderr reporting is best-effort and must not replace the original HTTP error.
+        }
+    }
+    if (httpStatus === 413) return errorResponse(413, "Script input is too large");
+    if (httpStatus === 400) return errorResponse(400, "Request body must be one JSON object");
+    return scriptError(error);
+}
+
 async function loadProjectSlug(configPath: string): Promise<string> {
     let config: ProjectConfig;
     try {
@@ -486,16 +552,85 @@ export async function startLocalServer(options: LocalServerOptions): Promise<Sta
     const projectSlug = options.projectSlug ?? await loadProjectSlug(configPath);
     if (!PROJECT_SLUG.test(projectSlug)) throw new Error("Invalid project slug");
     const handler = options.handler;
+    const triggers = options.triggers ?? [];
+    if (handler === undefined && triggers.length === 0) {
+        throw new Error("A project handler or at least one record trigger is required");
+    }
+    const readRecord = options.readRecord ?? bridgeRecordReader();
+    const report = options.onUnexpectedScriptError ?? reportUnexpectedScriptError;
     const invocation = options.invocation ?? await loadDevelopmentInvocation();
     let remainingRequests = options.maxRequests;
     if (remainingRequests !== undefined && (!Number.isInteger(remainingRequests) || remainingRequests < 1)) {
         throw new Error("maxRequests must be a positive integer");
     }
+    const countRequest = (): void => {
+        if (remainingRequests !== undefined && --remainingRequests === 0) {
+            setImmediate(() => server.close());
+        }
+    };
+
+    const serveLocalTooling = async (
+        request: IncomingMessage,
+        response: ServerResponse,
+        route: LocalToolingRoute,
+    ): Promise<void> => {
+        const requestMethod = request.method?.toUpperCase() ?? "";
+        if (route.kind === "unknown") {
+            jsonResponse(response, 404, {r: 404, msg: "Local tooling route not found"});
+            return;
+        }
+        if (route.kind === "triggers") {
+            if (requestMethod !== "GET") {
+                jsonResponse(response, 405, {r: 405, msg: "Unsupported HTTP method"}, {Allow: "GET"});
+                return;
+            }
+            jsonResponse(response, 200, {triggers: triggerManifests(triggers)});
+            return;
+        }
+        if (requestMethod !== "POST") {
+            jsonResponse(response, 405, {r: 405, msg: "Unsupported HTTP method"}, {Allow: "POST"});
+            return;
+        }
+        if (hasNonJsonBody(request)) {
+            jsonResponse(response, 415, {r: 415, msg: "Content-Type must be application/json"});
+            return;
+        }
+        try {
+            const body = await readBody(request);
+            const definition = findTrigger(triggers, route.key);
+            if (definition === undefined) {
+                throw new TriggerRunError(404, "TRIGGER_NOT_FOUND",
+                    `Trigger '${route.key}' is not exported by the project entry point`);
+            }
+            const result = await runTriggerLocally({
+                definition,
+                request: parseTriggerRunRequest(body),
+                projectSlug,
+                invocation,
+                readRecord,
+            });
+            jsonResponse(response, 200, result);
+        } catch (error) {
+            const rendered = failureResponse(error, report);
+            jsonResponse(response, rendered.status, rendered.body, rendered.headers);
+        } finally {
+            countRequest();
+        }
+    };
 
     const server = createServer(async (request, response) => {
+        const tooling = parseLocalToolingPath(request.url);
+        if (tooling !== null) {
+            await serveLocalTooling(request, response, tooling);
+            return;
+        }
         const routePath = parseInvocationPath(request.url, projectSlug);
         if (routePath === null) {
             jsonResponse(response, 404, {r: 404, msg: "TypeScript project route not found"});
+            return;
+        }
+        if (handler === undefined) {
+            jsonResponse(response, 404, {r: 404, msg: "This project has no HTTP handler; it exports record triggers only"});
             return;
         }
         const requestMethod = request.method?.toUpperCase() ?? "";
@@ -504,11 +639,7 @@ export async function startLocalServer(options: LocalServerOptions): Promise<Sta
                 {Allow: "GET, POST, PUT, PATCH, DELETE"});
             return;
         }
-        const contentType = request.headers["content-type"]?.split(";", 1)[0]?.trim().toLowerCase();
-        const declaredLength = Number(request.headers["content-length"] ?? "0");
-        const hasBody = (Number.isFinite(declaredLength) && declaredLength > 0)
-            || request.headers["transfer-encoding"] !== undefined;
-        if (hasBody && contentType !== "application/json") {
+        if (hasNonJsonBody(request)) {
             jsonResponse(response, 415, {r: 415, msg: "Content-Type must be application/json"});
             return;
         }
@@ -536,25 +667,10 @@ export async function startLocalServer(options: LocalServerOptions): Promise<Sta
             const result = await handler(JSON.stringify(input));
             httpResponse(response, renderScriptResult(result));
         } catch (error) {
-            const httpStatus = isRecord(error) && typeof error.httpStatus === "number" ? error.httpStatus : undefined;
-            const requestFailure = httpStatus === 400 || httpStatus === 413;
-            if (!requestFailure && !(error instanceof CogoverApiError)) {
-                try {
-                    (options.onUnexpectedScriptError ?? reportUnexpectedScriptError)(error);
-                } catch {
-                    // stderr reporting is best-effort and must not replace the original HTTP error.
-                }
-            }
-            const rendered = httpStatus === 413
-                ? errorResponse(413, "Script input is too large")
-                : httpStatus === 400
-                    ? errorResponse(400, "Request body must be one JSON object")
-                    : scriptError(error);
+            const rendered = failureResponse(error, report);
             jsonResponse(response, rendered.status, rendered.body, rendered.headers);
         } finally {
-            if (remainingRequests !== undefined && --remainingRequests === 0) {
-                setImmediate(() => server.close());
-            }
+            countRequest();
         }
     });
 

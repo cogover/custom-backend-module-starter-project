@@ -1,7 +1,8 @@
 import {resolve} from "node:path";
 import {pathToFileURL} from "node:url";
-import type {SandboxHandler} from "@cogover/sdk";
+import type {SandboxHandler, TriggerDefinition} from "@cogover/sdk";
 import {startLocalServer} from "./local-server.js";
+import {loadTriggerDefinitions} from "./trigger-runner.js";
 
 const USAGE = `Usage:
   node --import tsx local/cli.ts --entry <project-entry>
@@ -15,6 +16,11 @@ class UsageError extends Error {
         super(message);
         this.name = "UsageError";
     }
+}
+
+interface LoadedProject {
+    readonly handler?: SandboxHandler;
+    readonly triggers: readonly TriggerDefinition[];
 }
 
 function configuredPort(): number {
@@ -34,17 +40,30 @@ function configuredEntry(args: string[]): string | "help" {
     return args[1];
 }
 
-async function loadProjectHandler(entry: string): Promise<SandboxHandler> {
-    const module = await import(pathToFileURL(resolve(entry)).href) as {default?: unknown};
-    if (typeof module.default !== "function") {
-        throw new Error(`Project entry point must default-export a handler: ${entry}`);
+async function loadProject(entry: string): Promise<LoadedProject> {
+    const module = await import(pathToFileURL(resolve(entry)).href) as {default?: unknown; triggers?: unknown};
+    const handler = typeof module.default === "function" ? module.default as SandboxHandler : undefined;
+    const triggers = loadTriggerDefinitions(module.triggers);
+    if (handler === undefined && triggers.length === 0) {
+        throw new Error(`Project entry point must default-export a handler or export a non-empty triggers array: ${entry}`);
     }
-    return module.default as SandboxHandler;
+    return handler === undefined ? {triggers} : {handler, triggers};
 }
 
-async function serve(handler: SandboxHandler): Promise<number> {
-    const local = await startLocalServer({handler, port: configuredPort()});
+async function serve(project: LoadedProject): Promise<number> {
+    const local = await startLocalServer({
+        ...(project.handler === undefined ? {} : {handler: project.handler}),
+        triggers: project.triggers,
+        port: configuredPort(),
+    });
     process.stdout.write(`Cogover local project server listening at ${local.url}\n`);
+    if (project.handler === undefined) {
+        process.stdout.write("This project exports record triggers only; project routes respond 404.\n");
+    }
+    if (project.triggers.length > 0) {
+        process.stdout.write(`Record triggers: ${project.triggers.map(trigger => trigger.key).join(", ")}\n`);
+        process.stdout.write(`Run a trigger locally: POST http://${local.host}:${local.port}/__cogover/triggers/<key>\n`);
+    }
     process.stdout.write("Caller identity: caller_personnel_id from the active Project key Development Session.\n");
     process.stdout.write("context.invocation: public user/workspace snapshot from the active Development Session.\n");
     await new Promise<void>(resolve => {
@@ -66,7 +85,7 @@ async function main(): Promise<number> {
             process.stdout.write(USAGE);
             return 0;
         }
-        return await serve(await loadProjectHandler(entry));
+        return await serve(await loadProject(entry));
     } catch (error) {
         if (error instanceof UsageError) {
             process.stderr.write(`${error.message}\n\n${USAGE}`);
