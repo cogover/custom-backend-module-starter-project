@@ -88,6 +88,49 @@ Có thể chạy kiểm tra kiểu dữ liệu độc lập bằng lệnh:
 npm run typecheck
 ```
 
+Chạy test của bộ công cụ local bằng lệnh:
+
+```bash
+npm test
+```
+
+## Chạy record trigger trên local
+
+Cogover chỉ gửi sự kiện thay đổi record thật tới version đã publish và đang
+active của Project. Để debug một trigger trước khi publish, khai báo trigger
+bằng `defineTrigger`, đưa vào named export `triggers` của `src/main.ts` rồi khởi
+chạy local server như trên. Default export trở thành tùy chọn khi Project chỉ có
+trigger. Khi khởi động, server in ra danh sách key của trigger; `GET
+/__cogover/triggers` liệt kê các trigger cùng cấu hình đã chuẩn hóa.
+
+Chạy một trigger theo yêu cầu với record thật được đọc qua Development Session:
+
+```bash
+curl -s -X POST 'http://127.0.0.1:3100/__cogover/triggers/order_credit_check' \
+  -H 'Content-Type: application/json' \
+  --data '{"operation": "update", "recordId": "<record-id>", "changes": {"status": "confirmed"}}'
+```
+
+- `operation` là `create`, `update` hoặc `delete`.
+- `update` và `delete` đọc record `recordId` của Object mà trigger khai báo,
+  giới hạn theo `fields` của trigger, để làm `record.old`. Với `update`,
+  `changes` được phủ lên để tạo `record.new`; dùng giá trị đúng như handler cần
+  nhìn thấy.
+- `create` dựng `record.new` chỉ từ `changes`; record chưa có `id`.
+- Gửi `records: [{"recordId": "...", "changes": {...}}, ...]` thay cho dạng rút
+  gọn một record để chạy một lần gọi cho tối đa 200 record.
+
+Response gồm `input.records` đúng như handler nhận được, `results` chứa
+`changes` và `errors` của từng record theo định dạng handler trả về cho Cogover,
+và `warnings`. Runner không đánh giá `when`, `changedFields` hay `runWhen`; nó
+ghi vào `warnings` khi Cogover sẽ bỏ qua trigger. Field trong `changes` không
+nằm trong `fields` bị bỏ qua và được báo lại.
+
+Handler before-change chỉ được đọc trên Cogover, nhưng Development Session local
+không ép buộc điều đó. Khi thử trigger before-change, chạy `cogover-dev run
+--allow-writes=false` để một lệnh ghi trong handler cũng thất bại trên local.
+Các route dưới `/__cogover/` chỉ tồn tại trên local server.
+
 ## Publish và activate
 
 `npm run build` kiểm tra TypeScript trước khi publish; lệnh này không tạo file
@@ -116,7 +159,9 @@ các file session đã xuất vào Git.
 ├── cogover.example.json
 ├── local/
 │   ├── cli.ts
-│   └── local-server.ts
+│   ├── local-server.ts
+│   ├── trigger-runner.ts
+│   └── trigger-runner.test.ts
 ├── src/
 ├── package.json
 ├── package-lock.json
