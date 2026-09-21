@@ -4,7 +4,10 @@ import {
     defineTrigger,
     PermissionDeniedError,
     type InvocationContext,
+    type TriggerConfig,
     type TriggerDefinition,
+    type TriggerHandler,
+    type TriggerOperation,
 } from "@cogover/sdk";
 import {startLocalServer, type LocalServerOptions} from "./local-server.js";
 import {
@@ -15,6 +18,27 @@ import {
     type RecordReader,
     type StoredRecord,
 } from "./trigger-runner.js";
+
+/**
+ * Schema of the sample Object used by these tests. Declared here, not through the
+ * `WorkspaceObjects` augmentation, so the tests type-check whatever Objects the
+ * project declares in `src/workspace.d.ts`.
+ */
+interface TestSchema {
+    order: {
+        status: string | null;
+        amount: number | null;
+        customer: {id: string; name: string; objectSlug: string} | string | null;
+        approval_level: string | null;
+    };
+}
+
+function defineTestTrigger<TOperation extends TriggerOperation>(
+    config: TriggerConfig<"order", TOperation, TestSchema>,
+    handler: TriggerHandler<"order", TOperation, TestSchema>,
+): TriggerDefinition {
+    return defineTrigger<"order", TOperation, TestSchema>(config, handler);
+}
 
 const invocation: InvocationContext = Object.freeze({
     identity: "user",
@@ -42,7 +66,7 @@ function reader(calls: ReadCall[] = []): RecordReader {
 }
 
 function creditCheck(): TriggerDefinition {
-    return defineTrigger({
+    return defineTestTrigger({
         key: "order_credit_check",
         object: "order",
         timing: "beforeChange",
@@ -210,7 +234,7 @@ describe("runTriggerLocally", () => {
     });
 
     test("adds the onEnter note only for onEnter triggers", async () => {
-        const onEnter = defineTrigger({
+        const onEnter = defineTestTrigger({
             key: "order_followup",
             object: "order",
             timing: "afterChange",
@@ -226,7 +250,7 @@ describe("runTriggerLocally", () => {
     });
 
     test("rejects an operation the trigger does not declare", async () => {
-        const updateOnly = defineTrigger({
+        const updateOnly = defineTestTrigger({
             key: "update_only",
             object: "order",
             timing: "beforeChange",
@@ -243,7 +267,7 @@ describe("runTriggerLocally", () => {
     });
 
     test("propagates handler failures unchanged", async () => {
-        const failing = defineTrigger({
+        const failing = defineTestTrigger({
             key: "failing",
             object: "order",
             timing: "afterChange",
@@ -263,7 +287,7 @@ describe("loadTriggerDefinitions", () => {
 
     test("keeps valid definitions in order", () => {
         const first = creditCheck();
-        const second = defineTrigger({
+        const second = defineTestTrigger({
             key: "order_followup", object: "order", timing: "afterChange", operations: ["update"], fields: ["status"],
         }, async () => undefined);
         assert.deepEqual(loadTriggerDefinitions([first, second]).map(trigger => trigger.key),
