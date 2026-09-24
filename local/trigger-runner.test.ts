@@ -43,7 +43,7 @@ function defineTestTrigger<TOperation extends TriggerOperation>(
 const invocation: InvocationContext = Object.freeze({
     identity: "user",
     workspace: {id: "WS1", name: "Test Workspace"},
-    user: {accountId: "AC1", membership: {personnelId: "PER1"}},
+    user: {accountId: "AC1", membership: {personnelId: "PER1", isSuperAdmin: false, roles: []}},
 });
 
 const customer = {id: "CUS1", name: "Acme", objectSlug: "account"};
