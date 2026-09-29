@@ -117,6 +117,10 @@ curl -s -X POST 'http://127.0.0.1:3100/__cogover/triggers/order_credit_check' \
   `changes` được phủ lên để tạo `record.new`; dùng giá trị đúng như handler cần
   nhìn thấy.
 - `create` dựng `record.new` chỉ từ `changes`; record chưa có `id`.
+- Giá trị lookup mà runner đọc từ bản ghi đã lưu có `name: ""`, vì lệnh đọc
+  không tra cứu record liên kết; trên Cogover, lookup trong `record.old` và
+  `record.new` có sẵn tên. Muốn thử code dùng tên này, đưa lookup vào `changes`
+  dưới dạng `{"id": "...", "name": "..."}`.
 - Gửi `records: [{"recordId": "...", "changes": {...}}, ...]` thay cho dạng rút
   gọn một record để chạy một lần gọi cho tối đa 200 record.
 

@@ -118,6 +118,10 @@ curl -s -X POST 'http://127.0.0.1:3100/__cogover/triggers/order_credit_check' \
   applied on top to form `record.new`; use the values as the handler should see
   them.
 - `create` builds `record.new` from `changes` alone; the record has no `id` yet.
+- A lookup value that the runner reads from the stored record has `name: ""`,
+  because the read does not look up linked records; in Cogover, lookups in
+  `record.old` and `record.new` carry the name. To test code that uses the name,
+  put the lookup in `changes` as `{"id": "...", "name": "..."}`.
 - Send `records: [{"recordId": "...", "changes": {...}}, ...]` instead of the
   single-record shorthand to run one call for up to 200 records.
 
