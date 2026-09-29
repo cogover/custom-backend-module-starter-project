@@ -16,7 +16,7 @@
         "typecheck": "tsc -p tsconfig.json --noEmit"
     },
     "dependencies": {
-        "@cogover/sdk": "^0.13.0"
+        "@cogover/sdk": "^0.14.0"
     },
     "devDependencies": {
         "@types/node": "^20.0.0",
