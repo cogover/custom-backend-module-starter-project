@@ -417,8 +417,8 @@ describe("local server trigger routes", () => {
         });
     });
 
-    test("requires a handler or a trigger", async () => {
+    test("requires a handler, a trigger or an action", async () => {
         await assert.rejects(startLocalServer({projectSlug: "orders", port: 0, invocation}),
-            /A project handler or at least one record trigger is required/);
+            /A project handler, a record trigger or an action is required/);
     });
 });

@@ -61,6 +61,10 @@ export default router.toHandler();
 Đặt code cần deploy trong `src/`. Các file trong `local/` chỉ hỗ trợ phát triển
 local và không được import từ code trong `src/`.
 
+Ngoài default export (HTTP route), `src/main.ts` có thể liệt kê record trigger
+trong named export `triggers` và Custom Module Action trong named export
+`actions`. Default export là tùy chọn khi Project có trigger hoặc action.
+
 ## Phát triển local
 
 Đăng nhập bằng Project key tại lời nhắc nhập ẩn, sau đó kiểm tra cấu hình:
@@ -99,9 +103,8 @@ npm test
 Cogover chỉ gửi sự kiện thay đổi record thật tới version đã publish và đang
 active của Project. Để debug một trigger trước khi publish, khai báo trigger
 bằng `defineTrigger`, đưa vào named export `triggers` của `src/main.ts` rồi khởi
-chạy local server như trên. Default export trở thành tùy chọn khi Project chỉ có
-trigger. Khi khởi động, server in ra danh sách key của trigger; `GET
-/__cogover/triggers` liệt kê các trigger cùng cấu hình đã chuẩn hóa.
+chạy local server như trên. Khi khởi động, server in ra danh sách key của
+trigger; `GET /__cogover/triggers` liệt kê các trigger cùng cấu hình đã chuẩn hóa.
 
 Chạy một trigger theo yêu cầu với record thật được đọc qua Development Session:
 
@@ -135,6 +138,127 @@ không ép buộc điều đó. Khi thử trigger before-change, chạy `cogover
 --allow-writes=false` để một lệnh ghi trong handler cũng thất bại trên local.
 Các route dưới `/__cogover/` chỉ tồn tại trên local server.
 
+## Cho Process và AI Agent gọi action
+
+Custom Module Action là một thao tác ngắn của Project mà Process hoặc AI Agent
+của Cogover gọi tới. Khai báo action bằng `defineAction` của `@cogover/sdk`
+0.15.0 trở lên, mô tả input và output bằng bộ dựng schema `s`, rồi đưa vào named
+export `actions` của `src/main.ts`:
+
+```typescript
+import { defineAction, s } from "@cogover/sdk";
+
+export const actions = [
+  defineAction({
+    key: "check_credit",
+    label: "Check customer credit",
+    description: "Returns whether an account can buy the given amount on credit.",
+    exposeTo: ["process", "agent"],
+    effect: "read",
+    input: s.object({
+      accountId: s.recordId("account").describe("ID of the customer account"),
+      amount: s.number({ minimum: 0 }).describe("Order amount"),
+    }),
+    output: s.object({
+      allowed: s.boolean(),
+      reason: s.enum(["ok", "limit_exceeded", "account_not_found"]),
+    }),
+    async handler({ data }, input) {
+      const account = await data.object("account").records.get(input.accountId, {
+        fields: ["credit_limit", "credit_used"],
+      });
+      if (!account) return { allowed: false, reason: "account_not_found" };
+      const remaining = Number(account.fields.credit_limit ?? 0) - Number(account.fields.credit_used ?? 0);
+      const allowed = input.amount <= remaining;
+      return { allowed, reason: allowed ? "ok" : "limit_exceeded" };
+    },
+  }),
+];
+```
+
+- Sau khi publish và activate version, Process Builder hiển thị mỗi action có
+  `exposeTo` chứa `"process"` thành một node **Custom Module Action**, còn AI Agent
+  Builder hiển thị mỗi action có `"agent"` thành một tool thuộc nhóm
+  **Custom Module**. Chúng gọi version đang active theo slug của Project và `key`
+  của action, vì vậy giữ `key` ổn định giữa các version.
+- Action dành cho AI Agent cần có `description`; agent cũng đọc các đoạn
+  `describe` của input để điền input.
+- `effect: "read"` chạy action ở chế độ chỉ đọc trên Cogover. Action `"write"`
+  được phép thay đổi dữ liệu, và mặc định tool AI Agent của nó cần một người
+  duyệt trước khi chạy.
+- Cogover kiểm tra input trước khi handler chạy và kiểm tra output sau khi
+  handler trả về. Bên gọi chỉ nhận mã lỗi và một thông báo cố định khi handler
+  ném lỗi, vì vậy hãy trả các kết quả dự kiến trong output, như `reason` ở trên.
+- Node Process hoặc AI Agent quyết định action chạy dưới danh tính nào. Lời gọi
+  không có user cần `allowInternalSystem: true` trong identity policy đã duyệt
+  của version đang active.
+- Action có ngân sách của một HTTP route và chạy tối đa `timeoutMs` mili giây
+  (1000 đến 8000, mặc định 8000). Việc dài hơn hãy chuyển sang background job
+  bằng `jobs.enqueue`, dùng `action.runId` làm idempotency key.
+
+Bảng tùy chọn, quy tắc schema và mã lỗi nằm trong tài liệu Custom Module Action
+của SDK, `node_modules/@cogover/sdk/docs/en/api-reference/actions.md`, còn
+`processes.start` và `agents.start` nằm trong
+`node_modules/@cogover/sdk/docs/en/api-reference/processes-and-agents.md`.
+
+## Chạy action trên local
+
+Process và AI Agent chỉ gọi version đã publish và đang active. Để debug một
+action trước khi publish, khởi chạy local server như trên. Khi khởi động, server
+in ra danh sách key của action; `GET /__cogover/actions` liệt kê các action cùng
+cấu hình đã chuẩn hóa, gồm cả JSON Schema của input và output.
+
+Gọi một action giống như node Process hoặc AI Agent gọi:
+
+```bash
+curl -s -X POST 'http://127.0.0.1:3100/__cogover/actions/check_credit' \
+  -H 'Content-Type: application/json' \
+  --data '{"input": {"accountId": "<record-id>", "amount": 1200}}'
+```
+
+- `input` là bắt buộc: input của action đúng như bên gọi gửi.
+- `source` là tùy chọn: `{"type": "process"}` hoặc `{"type": "agent"}`, kèm bất kỳ
+  field nào của `invocation.source` (ví dụ `"runAs": "PERSONNEL"` hoặc
+  `"interactive": true`). Field bị thiếu nhận giá trị giữ chỗ local;
+  `initiatorPersonnelId` của nguồn agent mặc định là người gọi của Development
+  Session. Khi không có `source`, runner dùng phần tử đầu tiên của `exposeTo`.
+  Loại nguồn mà action không mở cho sẽ bị từ chối với HTTP 403
+  `ACTION_NOT_EXPOSED`.
+- `runId` là tùy chọn; nếu không gửi, runner tạo mới. Gửi lại cùng giá trị để
+  thử code dùng `action.runId` làm idempotency key.
+
+Response có HTTP status 200 mỗi khi action đã chạy, kể cả khi thất bại. Response
+gồm `status` (`COMPLETED` hoặc `FAILED`), `output`, và `error` với `code`,
+`message`, `details` đúng như node Process hoặc AI Agent nhận được, cùng `input`
+đúng như handler nhận được, `action` (`key`, `effect`, `runId`, `source`),
+`durationMs` và `warnings`. Key action không tồn tại trả về 404, body request
+không hợp lệ trả về 400.
+
+Giống Cogover, runner kiểm tra input theo schema `input` trước khi handler chạy
+(`INPUT_INVALID`, handler không chạy) và kiểm tra output theo schema `output` sau
+khi handler trả về (`OUTPUT_INVALID`), ngừng chờ sau `timeoutMs` (`TIMEOUT`), và
+báo lỗi do handler ném ra bằng mã và thông báo cố định mà bên gọi nhận được:
+`SCRIPT_ERROR` kèm `details.scriptErrorCode`, `PERMISSION_DENIED` hoặc
+`RATE_LIMITED`. Terminal của local server hiển thị stack của lỗi không dự kiến.
+`cogover-dev run` áp dụng ngân sách của HTTP route cho mỗi lần gọi.
+
+Lời gọi local khác Cogover ở các điểm sau:
+
+- Action luôn chạy dưới danh tính người gọi của Development Session, bất kể
+  `runAs` hay danh tính agent mà Cogover sẽ dùng; runner thêm cảnh báo khi
+  `runAs` là `"SYSTEM"`.
+- Cogover từ chối lệnh ghi và các tác động phụ khác trong action `"read"`;
+  Development Session local thì không. Khi thử action chỉ đọc, chạy
+  `cogover-dev run --allow-writes=false` để lệnh ghi cũng thất bại trên local.
+- Cogover trả lại kết quả đã lưu khi bên gọi gửi lại một `runId` đã hoàn tất, từ
+  chối `runId` dùng lại với input khác và chặn vòng lặp bằng `MAX_HOP_EXCEEDED`;
+  runner local không làm những việc này.
+- Sau `TIMEOUT`, handler có thể vẫn đang chạy trên local; Cogover thì dừng nó.
+- `processes.start` và `agents.start` khởi chạy lượt chạy thật từ Development
+  Session cho phép ghi, nhưng lời gọi có truyền `onComplete` hoặc `onResult` bị
+  từ chối với `NOT_SUPPORTED`: các job đó chỉ chạy trong version đã publish, vì
+  vậy hãy thử chúng sau khi publish.
+
 ## Publish và activate
 
 `npm run build` kiểm tra TypeScript trước khi publish; lệnh này không tạo file
@@ -162,6 +286,8 @@ các file session đã xuất vào Git.
 .
 ├── cogover.example.json
 ├── local/
+│   ├── action-runner.ts
+│   ├── action-runner.test.ts
 │   ├── cli.ts
 │   ├── local-server.ts
 │   ├── trigger-runner.ts
