@@ -260,6 +260,8 @@ The local call differs from Cogover in these ways:
   Development Session, but a start that passes `onComplete` or `onResult` is
   refused with `NOT_SUPPORTED`: those jobs run only in a published version, so
   test them after publishing.
+- `agents.start` with `deliverTo` (`@cogover/sdk` 0.16.0 or later) sends a real
+  chat message to that personnel, also from a Development Session.
 
 ## Publish and Activate
 

@@ -258,6 +258,8 @@ Lời gọi local khác Cogover ở các điểm sau:
   Session cho phép ghi, nhưng lời gọi có truyền `onComplete` hoặc `onResult` bị
   từ chối với `NOT_SUPPORTED`: các job đó chỉ chạy trong version đã publish, vì
   vậy hãy thử chúng sau khi publish.
+- `agents.start` có `deliverTo` (`@cogover/sdk` 0.16.0 trở lên) gửi tin chat
+  thật tới nhân sự đó, kể cả khi gọi từ Development Session.
 
 ## Publish và activate
 
