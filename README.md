@@ -47,13 +47,22 @@ The local `cogover.json` file is intentionally ignored by Git.
 
 ## Add an Entry Point
 
-Create `src/main.ts`. For example:
+Create a route handler in its own file and `src/main.ts`. For example:
 
 ```typescript
+// src/handlers/health.ts
+import type { ScriptHandler } from "@cogover/sdk";
+
+export const health: ScriptHandler<unknown, { ok: boolean }> = async () => ({ ok: true });
+```
+
+```typescript
+// src/main.ts
 import { createRouter } from "@cogover/sdk";
+import { health } from "./handlers/health.js";
 
 const router = createRouter();
-router.get("/", async () => ({ ok: true }));
+router.get("/", health);
 
 export default router.toHandler();
 ```
@@ -64,7 +73,8 @@ and must not be imported by code in `src/`.
 Besides the default export (HTTP routes), `src/main.ts` can list record triggers
 in a named `triggers` export and Custom Module Actions in a named `actions`
 export. The default export is optional when the Project has triggers or
-actions.
+actions. Define each trigger and action in its own file and only collect them
+in `src/main.ts`; see [Project Layout](#project-layout).
 
 ## Develop Locally
 
@@ -145,38 +155,44 @@ under `/__cogover/` exist only on the local server.
 
 A Custom Module Action is a short operation of the Project that a Cogover
 Process or AI Agent calls. Declare it with `defineAction` from `@cogover/sdk`
-0.15.0 or later, describe its input and output with the `s` schema builder, and
-list it in the named `actions` export of `src/main.ts`:
+0.15.0 or later in its own file, describe its input and output with the `s`
+schema builder, and list it in the named `actions` export of `src/main.ts`:
 
 ```typescript
+// src/actions/check-credit.ts
 import { defineAction, s } from "@cogover/sdk";
 
-export const actions = [
-  defineAction({
-    key: "check_credit",
-    label: "Check customer credit",
-    description: "Returns whether an account can buy the given amount on credit.",
-    exposeTo: ["process", "agent"],
-    effect: "read",
-    input: s.object({
-      accountId: s.recordId("account").describe("ID of the customer account"),
-      amount: s.number({ minimum: 0 }).describe("Order amount"),
-    }),
-    output: s.object({
-      allowed: s.boolean(),
-      reason: s.enum(["ok", "limit_exceeded", "account_not_found"]),
-    }),
-    async handler({ data }, input) {
-      const account = await data.object("account").records.get(input.accountId, {
-        fields: ["credit_limit", "credit_used"],
-      });
-      if (!account) return { allowed: false, reason: "account_not_found" };
-      const remaining = Number(account.fields.credit_limit ?? 0) - Number(account.fields.credit_used ?? 0);
-      const allowed = input.amount <= remaining;
-      return { allowed, reason: allowed ? "ok" : "limit_exceeded" };
-    },
+export const checkCredit = defineAction({
+  key: "check_credit",
+  label: "Check customer credit",
+  description: "Returns whether an account can buy the given amount on credit.",
+  exposeTo: ["process", "agent"],
+  effect: "read",
+  input: s.object({
+    accountId: s.recordId("account").describe("ID of the customer account"),
+    amount: s.number({ minimum: 0 }).describe("Order amount"),
   }),
-];
+  output: s.object({
+    allowed: s.boolean(),
+    reason: s.enum(["ok", "limit_exceeded", "account_not_found"]),
+  }),
+  async handler({ data }, input) {
+    const account = await data.object("account").records.get(input.accountId, {
+      fields: ["credit_limit", "credit_used"],
+    });
+    if (!account) return { allowed: false, reason: "account_not_found" };
+    const remaining = Number(account.fields.credit_limit ?? 0) - Number(account.fields.credit_used ?? 0);
+    const allowed = input.amount <= remaining;
+    return { allowed, reason: allowed ? "ok" : "limit_exceeded" };
+  },
+});
+```
+
+```typescript
+// src/main.ts
+import { checkCredit } from "./actions/check-credit.js";
+
+export const actions = [checkCredit];
 ```
 
 - After you publish and activate the version, Process Builder offers each
@@ -301,6 +317,50 @@ files untracked.
 ├── package-lock.json
 └── tsconfig.json
 ```
+
+Every invocation of a route, trigger, job, or action first loads the module
+code it runs, so a large module is slow to start. Organize `src/` with one file
+per entry point from the start, so that the module stays fast to load as it
+grows:
+
+```text
+src/
+├── main.ts          # only imports, collects exports, and registers routes
+├── triggers/
+│   └── order-credit-check.ts
+├── jobs/
+│   └── order-reminder.ts
+├── actions/
+│   └── check-credit.ts
+├── handlers/        # route handlers
+│   └── health.ts
+└── lib/             # shared logic
+```
+
+- Define and export each trigger, job, or action (`defineTrigger`, `defineJob`,
+  `defineAction`) in its own file, not in `src/main.ts`. `src/main.ts` only
+  imports them and lists them in the named `triggers`, `jobs`, and `actions`
+  exports.
+- Keep route handlers in their own files, for example in `src/handlers/`, and
+  register the routes on the main router in `src/main.ts`.
+- Code that runs while a file loads, outside functions and handlers, only
+  computes values and builds objects of that file. It does not change anything
+  outside the file (a variable or object of another file, a shared registry, a
+  global, or a prototype) and gives the same result each time: no
+  `Date.now()`, `Math.random()`, `console.log()`, or SDK services such as
+  `fetch` at the top level of a file. Configure libraries inside handlers.
+
+This layout works with every SDK version and Workspace. When your Workspace
+supports it, each group of routes can move to a router file that contains only
+`createRouter()` and its route registrations, mounted in `src/main.ts` with
+`router.route(prefix, childRouter)` (`@cogover/sdk` 0.18.0 or later), and the
+Project can declare `"entryPointParts": true` in `cogover.json` (Cogover Dev
+CLI 0.22.0 or later) so that each entry point loads only the code it needs. A
+Workspace builds each version with the SDK of its own Runtime: until it
+supports `router.route()`, a version that calls it fails to publish even
+though `npm run typecheck` passes. See "Keep the module fast to load" in the SDK
+usage guide, `node_modules/@cogover/sdk/docs/en/usage-guide.md`, also in the
+[`@cogover/sdk` package on npm](https://www.npmjs.com/package/@cogover/sdk?activeTab=code).
 
 ## License
 

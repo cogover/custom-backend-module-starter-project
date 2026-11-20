@@ -47,13 +47,22 @@ File `cogover.json` local được chủ động loại khỏi Git bằng quy t�
 
 ## Thêm entry point
 
-Tạo `src/main.ts`. Ví dụ:
+Tạo hàm xử lý route trong file riêng và `src/main.ts`. Ví dụ:
 
 ```typescript
+// src/handlers/health.ts
+import type { ScriptHandler } from "@cogover/sdk";
+
+export const health: ScriptHandler<unknown, { ok: boolean }> = async () => ({ ok: true });
+```
+
+```typescript
+// src/main.ts
 import { createRouter } from "@cogover/sdk";
+import { health } from "./handlers/health.js";
 
 const router = createRouter();
-router.get("/", async () => ({ ok: true }));
+router.get("/", health);
 
 export default router.toHandler();
 ```
@@ -63,7 +72,9 @@ local và không được import từ code trong `src/`.
 
 Ngoài default export (HTTP route), `src/main.ts` có thể liệt kê record trigger
 trong named export `triggers` và Custom Module Action trong named export
-`actions`. Default export là tùy chọn khi Project có trigger hoặc action.
+`actions`. Default export là tùy chọn khi Project có trigger hoặc action. Định
+nghĩa mỗi trigger và action trong file riêng, `src/main.ts` chỉ gom lại; xem
+[Cấu trúc project](#cấu-trúc-project).
 
 ## Phát triển local
 
@@ -142,38 +153,44 @@ Các route dưới `/__cogover/` chỉ tồn tại trên local server.
 
 Custom Module Action là một thao tác ngắn của Project mà Process hoặc AI Agent
 của Cogover gọi tới. Khai báo action bằng `defineAction` của `@cogover/sdk`
-0.15.0 trở lên, mô tả input và output bằng bộ dựng schema `s`, rồi đưa vào named
-export `actions` của `src/main.ts`:
+0.15.0 trở lên trong file riêng, mô tả input và output bằng bộ dựng schema `s`,
+rồi đưa vào named export `actions` của `src/main.ts`:
 
 ```typescript
+// src/actions/check-credit.ts
 import { defineAction, s } from "@cogover/sdk";
 
-export const actions = [
-  defineAction({
-    key: "check_credit",
-    label: "Check customer credit",
-    description: "Returns whether an account can buy the given amount on credit.",
-    exposeTo: ["process", "agent"],
-    effect: "read",
-    input: s.object({
-      accountId: s.recordId("account").describe("ID of the customer account"),
-      amount: s.number({ minimum: 0 }).describe("Order amount"),
-    }),
-    output: s.object({
-      allowed: s.boolean(),
-      reason: s.enum(["ok", "limit_exceeded", "account_not_found"]),
-    }),
-    async handler({ data }, input) {
-      const account = await data.object("account").records.get(input.accountId, {
-        fields: ["credit_limit", "credit_used"],
-      });
-      if (!account) return { allowed: false, reason: "account_not_found" };
-      const remaining = Number(account.fields.credit_limit ?? 0) - Number(account.fields.credit_used ?? 0);
-      const allowed = input.amount <= remaining;
-      return { allowed, reason: allowed ? "ok" : "limit_exceeded" };
-    },
+export const checkCredit = defineAction({
+  key: "check_credit",
+  label: "Check customer credit",
+  description: "Returns whether an account can buy the given amount on credit.",
+  exposeTo: ["process", "agent"],
+  effect: "read",
+  input: s.object({
+    accountId: s.recordId("account").describe("ID of the customer account"),
+    amount: s.number({ minimum: 0 }).describe("Order amount"),
   }),
-];
+  output: s.object({
+    allowed: s.boolean(),
+    reason: s.enum(["ok", "limit_exceeded", "account_not_found"]),
+  }),
+  async handler({ data }, input) {
+    const account = await data.object("account").records.get(input.accountId, {
+      fields: ["credit_limit", "credit_used"],
+    });
+    if (!account) return { allowed: false, reason: "account_not_found" };
+    const remaining = Number(account.fields.credit_limit ?? 0) - Number(account.fields.credit_used ?? 0);
+    const allowed = input.amount <= remaining;
+    return { allowed, reason: allowed ? "ok" : "limit_exceeded" };
+  },
+});
+```
+
+```typescript
+// src/main.ts
+import { checkCredit } from "./actions/check-credit.js";
+
+export const actions = [checkCredit];
 ```
 
 - Sau khi publish và activate version, Process Builder hiển thị mỗi action có
@@ -299,6 +316,49 @@ các file session đã xuất vào Git.
 ├── package-lock.json
 └── tsconfig.json
 ```
+
+Mỗi lần gọi route, trigger, job hay action đều phải nạp code của module trước
+khi chạy, nên module lớn khởi động chậm. Tổ chức `src/` mỗi điểm vào một file
+ngay từ đầu để module lớn dần vẫn nạp nhanh:
+
+```text
+src/
+├── main.ts          # chỉ import, gom export và đăng ký route
+├── triggers/
+│   └── order-credit-check.ts
+├── jobs/
+│   └── order-reminder.ts
+├── actions/
+│   └── check-credit.ts
+├── handlers/        # hàm xử lý route
+│   └── health.ts
+└── lib/             # logic dùng chung
+```
+
+- Định nghĩa và export mỗi trigger, job hay action (`defineTrigger`,
+  `defineJob`, `defineAction`) trong file riêng, không trong `src/main.ts`.
+  `src/main.ts` chỉ import và liệt kê chúng trong các named export `triggers`,
+  `jobs` và `actions`.
+- Đặt hàm xử lý route trong file riêng, ví dụ trong `src/handlers/`, và đăng ký
+  route trên router chính trong `src/main.ts`.
+- Code chạy lúc file được nạp (ngoài hàm và handler) chỉ tính giá trị và tạo
+  đối tượng của chính file đó. Code này không thay đổi gì bên ngoài file (biến
+  hay đối tượng của file khác, registry dùng chung, global, prototype) và cho
+  cùng kết quả ở mọi lần nạp: không gọi `Date.now()`, `Math.random()`,
+  `console.log()` hay dịch vụ SDK như `fetch` ở cấp cao nhất của file. Cấu hình
+  thư viện bên trong handler.
+
+Bố cục này chạy được với mọi phiên bản SDK và mọi Workspace. Khi Workspace hỗ
+trợ, mỗi nhóm route có thể chuyển sang một file router chỉ chứa
+`createRouter()` và các dòng đăng ký route, gắn vào `src/main.ts` bằng
+`router.route(prefix, childRouter)` (`@cogover/sdk` 0.18.0 trở lên), và Project
+có thể khai báo `"entryPointParts": true` trong `cogover.json` (Cogover Dev CLI
+0.22.0 trở lên) để mỗi điểm vào chỉ nạp phần code nó cần. Workspace build mỗi
+version bằng SDK của chính Runtime của nó: khi chưa hỗ trợ `router.route()`,
+version gọi hàm này publish thất bại dù `npm run typecheck` đạt. Xem mục
+"Keep the module fast to load" trong usage guide của SDK,
+`node_modules/@cogover/sdk/docs/en/usage-guide.md`, cũng có trong
+[gói `@cogover/sdk` trên npm](https://www.npmjs.com/package/@cogover/sdk?activeTab=code).
 
 ## Giấy phép
 
